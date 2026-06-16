@@ -66,7 +66,6 @@ def generate_portfolio(nuber_of_loans: int, seed: int) -> pd.DataFrame:
     LGD = np.where(has_coll, 0.30, 0.45) * rng.lognormal(0, 0.15, N)
     LGD = LGD.clip(0.01, 0.99)
     PD[default_flag] = 1.0     # defaulted names: PD = 1
-    PD[rng.uniform(range(N))] = rng.uniform(1.2, 5)
 
     df = pd.DataFrame({
         'exposure_id': [f'EXP{i:06d}' for i in range(N)],
