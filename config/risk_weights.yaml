@@ -1,0 +1,169 @@
+# config/risk_weights.yaml
+# ---------------------------------------------------------------------------
+# CRR3 / Basel III standardised-approach risk-weight lookup tables.
+#
+# Design rule: keep this file purely declarative. Classification code should
+# determine the exposure_class and lookup dimensions, then read the applicable
+# risk_weight from here.
+#
+# Keys are aligned with config/portfolio.yaml:
+#   ratings: AAA_AA, A, BBB, BB, B, CCC, unrated
+#   counterparty types/classes: sovereign, institution, corporate, retail,
+#   individual, residential_real_estate, commercial_real_estate, defaulted
+#
+# Units:
+#   risk weights are decimal fractions: 0.20 = 20%, 1.50 = 150%.
+#   LTV bucket upper bounds are decimals: 0.55 = 55%.
+#
+# Important simplifications for this synthetic project:
+#   - These tables are intended for a clean Stage 1/2 RWA demo, not COREP filing.
+#   - SME support factors, currency mismatch multipliers, due-diligence overrides,
+#     covered bonds, CIU, equity, subordinated debt, off-balance-sheet CCFs,
+#     guarantees, unfunded CRM, and jurisdictional macroprudential overlays are
+#     intentionally out of scope.
+#   - Real-estate tables use a whole-loan/LTV-bucket lookup because the generator
+#     creates one property_value and one loan_amount per RE row.
+# ---------------------------------------------------------------------------
+
+metadata:
+  name: CRR3_SA_synthetic_risk_weights
+  version: 0.1.0
+  regulatory_basis: CRR3 / Basel III standardised approach, simplified project table
+  rwa_formula: rwa = ead_after_crm * risk_weight
+  risk_weight_unit: decimal
+  ltv_unit: decimal
+
+rating_buckets: [AAA_AA, A, BBB, BB, B, CCC, unrated]
+
+# ---------------------------------------------------------------------------
+# Non-real-estate exposure classes: lookup by exposure_class + external_rating.
+# ---------------------------------------------------------------------------
+by_class_rating:
+  sovereign:
+    AAA_AA: 0.00
+    A:      0.20
+    BBB:    0.50
+    BB:     1.00
+    B:      1.00
+    CCC:    1.50
+    unrated: 1.00
+
+  institution:
+    AAA_AA: 0.20
+    A:      0.30
+    BBB:    0.50
+    BB:     1.00
+    B:      1.00
+    CCC:    1.50
+    unrated: 0.50
+
+  corporate:
+    AAA_AA: 0.20
+    A:      0.50
+    BBB:    0.75
+    BB:     1.00
+    B:      1.50
+    CCC:    1.50
+    unrated: 1.00
+
+  # Regulatory retail, once the classifier has checked the retail limit and
+  # granularity tests from portfolio.yaml thresholds.
+  retail:
+    unrated: 0.75
+    fallback: 0.75
+
+  # Natural persons not secured by real estate and not qualifying elsewhere.
+  individual:
+    unrated: 0.75
+    fallback: 0.75
+
+  # Fallback bucket for rows where classification/rating is unusable but the row
+  # is still retained for the demo. Conservative by design.
+  other:
+    fallback: 1.00
+
+# ---------------------------------------------------------------------------
+# Defaulted exposures.
+# Classifier should route here when days_past_due > thresholds.default_dpd_days
+# or default_flag is true.
+# ---------------------------------------------------------------------------
+defaulted:
+  unsecured_or_unknown:
+    risk_weight: 1.50
+  residential_real_estate:
+    risk_weight: 1.00
+  commercial_real_estate:
+    risk_weight: 1.00
+  notes:
+    - "Simplified: no specific-credit-risk-adjustment/provisioning split."
+    - "Use unsecured_or_unknown unless collateral-specific default treatment is implemented."
+
+# ---------------------------------------------------------------------------
+# Real-estate-secured exposures: whole-loan approach by LTV.
+# The generator creates residential/commercial property flags and LTV, so this
+# is the easiest lookup for a synthetic CRR3 SA pipeline.
+# ---------------------------------------------------------------------------
+by_class_ltv:
+  residential_real_estate:
+    non_ipre:
+      buckets:
+        - { ltv_max: 0.50, risk_weight: 0.20 }
+        - { ltv_max: 0.60, risk_weight: 0.25 }
+        - { ltv_max: 0.80, risk_weight: 0.30 }
+        - { ltv_max: 0.90, risk_weight: 0.40 }
+        - { ltv_max: 1.00, risk_weight: 0.50 }
+        - { ltv_max: null, risk_weight: 0.70 }
+    ipre:
+      buckets:
+        - { ltv_max: 0.50, risk_weight: 0.30 }
+        - { ltv_max: 0.60, risk_weight: 0.35 }
+        - { ltv_max: 0.80, risk_weight: 0.45 }
+        - { ltv_max: 0.90, risk_weight: 0.60 }
+        - { ltv_max: 1.00, risk_weight: 0.75 }
+        - { ltv_max: null, risk_weight: 1.05 }
+    fallback_if_ltv_missing: 1.00
+
+  commercial_real_estate:
+    non_ipre:
+      buckets:
+        - { ltv_max: 0.60, risk_weight: 0.60 }
+        - { ltv_max: null, risk_weight: 1.00 }
+    ipre:
+      buckets:
+        - { ltv_max: 0.60, risk_weight: 0.70 }
+        - { ltv_max: 0.80, risk_weight: 0.90 }
+        - { ltv_max: null, risk_weight: 1.10 }
+    fallback_if_ltv_missing: 1.00
+
+# ---------------------------------------------------------------------------
+# Optional loan-splitting parameters, if you later implement splitting instead
+# of whole-loan LTV buckets. These are not used by default.
+# ---------------------------------------------------------------------------
+loan_splitting:
+  enabled_by_default: false
+  residential_real_estate:
+    secured_part_ltv_max: 0.55
+    secured_part_risk_weight: 0.20
+    residual_treatment: counterparty_lookup
+  commercial_real_estate:
+    secured_part_ltv_max: 0.55
+    secured_part_risk_weight: 0.60
+    residual_treatment: counterparty_lookup
+
+# ---------------------------------------------------------------------------
+# Validation expectations for transform/rwa.py.
+# ---------------------------------------------------------------------------
+validation:
+  require_decimal_risk_weights: true
+  allow_null_ltv_max_only_for_last_bucket: true
+  require_monotone_ltv_buckets: true
+  allowed_exposure_classes:
+    - sovereign
+    - institution
+    - corporate
+    - retail
+    - individual
+    - residential_real_estate
+    - commercial_real_estate
+    - defaulted
+    - other
