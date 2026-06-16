@@ -1,0 +1,119 @@
+# config/portfolio.yaml
+# ---------------------------------------------------------------------------
+# Synthetic portfolio generator configuration.
+#
+# Design rule: draw the DRIVER first, then derive what depends on it.
+#   counterparty_type -> EAD scale + rating distribution
+#   rating            -> PD anchor + default likelihood
+#   property_value    -> loan_amount (via LTV) -> drives the RE exposure classes
+#
+# The `thresholds:` block holds CRR3 POLICY parameters (not generation knobs).
+# They live here as the single source of truth and are ALSO read by
+# transform/classify.py, so the generator and the classifier can never drift.
+# ---------------------------------------------------------------------------
+
+generation:
+  n_exposures: 5000
+  seed: 42
+  currency: EUR
+  inject_dirt: true            # toggle for the clean-vs-realistic demo
+
+# Counterparty mix -- proportions, must sum to 1.0.
+# Corporate-heavy with a retail book: a typical universal-bank shape.
+counterparty_mix:
+  sovereign:    0.08
+  institution:  0.07
+  corporate:    0.40
+  retail:       0.25           # regulatory-retail SMEs / small business
+  individual:   0.20           # natural persons (mortgages, consumer)
+
+# --- EAD ---------------------------------------------------------------------
+# Lognormal per type. `median_eur` is the lognormal median (= exp(mu));
+# `sigma_log` is the log-scale spread. Generator sets mu = ln(median_eur).
+# NOTE: for real-estate-secured rows, exposure_amount is OVERWRITTEN with
+# loan_amount (see real_estate block) so EAD stays coherent with the property.
+ead:
+  lognormal_by_type:
+    sovereign:   { median_eur: 50000000, sigma_log: 0.9 }
+    institution: { median_eur: 20000000, sigma_log: 0.9 }
+    corporate:   { median_eur:  2000000, sigma_log: 1.1 }
+    retail:      { median_eur:   150000, sigma_log: 0.8 }
+    individual:  { median_eur:   250000, sigma_log: 0.6 }
+  min_eur: 1000                # floor applied after sampling
+
+# --- Rating (conditional on type) -------------------------------------------
+# Categorical over buckets, per type; each block must sum to 1.0.
+# Natural persons receive no ECAI rating -> always 'unrated'.
+rating_buckets: [AAA_AA, A, BBB, BB, B, CCC, unrated]
+rating_by_type:
+  sovereign:   { AAA_AA: 0.70, A: 0.15, BBB: 0.10, BB: 0.03, B: 0.01, CCC: 0.00, unrated: 0.01 }
+  institution: { AAA_AA: 0.30, A: 0.35, BBB: 0.20, BB: 0.07, B: 0.03, CCC: 0.01, unrated: 0.04 }
+  corporate:   { AAA_AA: 0.05, A: 0.15, BBB: 0.25, BB: 0.20, B: 0.12, CCC: 0.05, unrated: 0.18 }
+  retail:      { unrated: 1.00 }
+  individual:  { unrated: 1.00 }
+
+# --- Maturity (years) --------------------------------------------------------
+maturity:
+  default:     { distribution: gamma,   shape: 2.0, scale: 2.0, min: 0.25, max: 10 }
+  real_estate: { distribution: uniform, min: 10, max: 30 }      # mortgages run long
+
+# --- Real-estate collateral --------------------------------------------------
+# Fraction of each type's exposures that are RE-secured (-> RE exposure class).
+# property_value is the driver; loan_amount = ltv * property_value, and that
+# loan_amount then OVERWRITES exposure_amount for these rows.
+real_estate:
+  secured_fraction_by_type:
+    corporate:  0.30
+    retail:     0.35
+    individual: 0.70
+  residential_share: 0.65       # remainder -> commercial real estate
+  property_value:
+    lognormal: { median_eur: 400000, sigma_log: 0.7 }
+  ltv:                          # beta sampled then scaled into [min, max]; mean ~0.64
+    distribution: beta
+    a: 3
+    b: 4
+    min: 0.30
+    max: 1.10                   # >1.0 retained on purpose: feeds high-LTV bucket + dirt
+
+# --- Other collateral (non-RE) ----------------------------------------------
+collateral:
+  types: [none, financial, receivables, other_physical]
+  type_probs: [0.55, 0.20, 0.15, 0.10]
+  value_as_fraction_of_ead: { distribution: uniform, min: 0.2, max: 1.0 }
+
+# --- Default / days-past-due -------------------------------------------------
+# Base default rate scaled by rating, so weaker credits default more often
+# (rating drives default, consistent with the driver-first rule).
+default:
+  base_rate: 0.03
+  rating_multiplier: { AAA_AA: 0.1, A: 0.3, BBB: 0.7, BB: 1.5, B: 3.0, CCC: 6.0, unrated: 1.5 }
+  dpd_if_defaulted:  { min: 91, max: 365 }
+  dpd_if_performing: { min: 0,  max: 30 }     # most 0, with a small arrears tail
+
+# --- IRB inputs (consumed only if the IRB layer runs) ------------------------
+# PD anchored to rating then jittered; LGD beta around a ~0.43 mean.
+irb:
+  pd_by_rating: { AAA_AA: 0.0003, A: 0.0010, BBB: 0.0040, BB: 0.0150, B: 0.0500, CCC: 0.1800, unrated: 0.0250 }
+  pd_jitter_sigma_log: 0.35     # multiplicative lognormal noise around the anchor
+  pd_bounds: { min: 0.0003, max: 0.9999 }     # 0.03% = the Basel regulatory PD floor
+  lgd: { distribution: beta, a: 4, b: 5, min: 0.05, max: 0.90 }   # scaled mean ~0.43
+
+# --- Policy thresholds (SHARED with transform/classify.py) -------------------
+# CRR3 parameters, NOT generation knobs. Single source of truth for both
+# the generator and the exposure-class classifier.
+thresholds:
+  default_dpd_days:   90        # > 90 dpd  =>  exposures-in-default class
+  retail_limit_eur:   1000000   # aggregate-to-one-obligor cap for regulatory retail
+  retail_granularity: 0.002     # 0.2% of the total regulatory retail portfolio
+
+# --- Dirt injection ----------------------------------------------------------
+# Each count maps 1:1 onto a validate.py check, closing the Stage 1 <-> Stage 2
+# loop. Applied only when generation.inject_dirt is true.
+dirt:
+  n_nonpositive_ead:           12   # exposure_amount <= 0
+  n_missing_property_value:     8   # RE row with property_value = NaN -> LTV breaks
+  n_dpd_default_inconsistency: 10   # days_past_due > 90 but default_flag = False
+  n_pd_out_of_range:            5   # PD outside [0, 1]
+  n_lgd_out_of_range:           5   # LGD outside [0, 1]
+  n_missing_rating:            15   # rated type with external_rating blanked
