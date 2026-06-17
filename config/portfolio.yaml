@@ -99,7 +99,7 @@ irb:
   pd_bounds: { min: 0.0003, max: 0.9999 }     # 0.03% = the Basel regulatory PD floor
   lgd: { distribution: beta, a: 4, b: 5, min: 0.05, max: 0.90 }   # scaled mean ~0.43
 
-# --- Policy thresholds (SHARED with transform/classify.py) -------------------
+# --- Policy thresholds (SHARED with transform/classifier.py) -------------------
 # CRR3 parameters, NOT generation knobs. Single source of truth for both
 # the generator and the exposure-class classifier.
 thresholds:
@@ -108,7 +108,7 @@ thresholds:
   retail_granularity: 0.002     # 0.2% of the total regulatory retail portfolio
 
 # --- Dirt injection ----------------------------------------------------------
-# Each count maps 1:1 onto a validate.py check, closing the Stage 1 <-> Stage 2
+# Each count maps 1:1 onto a validator.py check, closing the Stage 1 <-> Stage 2
 # loop. Applied only when generation.inject_dirt is true.
 dirt:
   n_nonpositive_ead:           12   # exposure_amount <= 0
