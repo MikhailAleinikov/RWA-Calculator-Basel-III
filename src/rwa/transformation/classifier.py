@@ -26,6 +26,51 @@ RETAIL_LIMIT_EUR = THRESHOLDS["retail_limit_eur"]
 RETAIL_GRANULARITY = THRESHOLDS["retail_granularity"]
 
 
+# ---------------------------------------------------------------------------
+# Counterparty-type vocabularies. Kept as module-level sets so the precedence
+# rules below read declaratively and the retail/corporate spillover logic has a
+# single source of truth.
+# ---------------------------------------------------------------------------
+SOVEREIGN_TYPES = {
+    "sovereign",
+    "central_government",
+    "central_gov",
+    "central_bank",
+    "central_gov_central_bank",
+}
+
+INSTITUTION_TYPES = {
+    "institution",
+    "institutions",
+    "bank",
+    "credit_institution",
+    "financial_institution",
+}
+
+# Regulatory-retail counterparties (SMEs / small business). Subject to the
+# retail size cap; an obligor above the cap spills over into `corporate`.
+REGULATORY_RETAIL_TYPES = {
+    "retail",
+    "sme",
+    "small_business",
+}
+
+# Natural persons. These map to the YAML `individual` class when they are not
+# secured by real estate (those are caught earlier) and not in default.
+INDIVIDUAL_TYPES = {
+    "individual",
+    "natural_person",
+    "person",
+}
+
+CORPORATE_TYPES = {
+    "corporate",
+    "corporates",
+    "company",
+    "large_corporate",
+}
+
+
 def _get(r: pd.Series, *names: str, default: Any = None) -> Any:
     """
     Return the first non-null value among possible column names.
@@ -70,6 +115,30 @@ def _truthy(x: Any) -> bool:
     }
 
 
+def _counterparty(r: pd.Series) -> str:
+    return _norm(_get(r, "counterparty_type", "obligor_type", "borrower_type"))
+
+
+def _obligor_exposure(r: pd.Series) -> float:
+    """Aggregate-to-one-obligor exposure used for the retail size cap.
+
+    Falls back to the single-exposure amount when no aggregated figure is
+    present (the synthetic generator produces one row per obligor).
+    """
+    amount = _get(
+        r,
+        "aggregate_obligor_exposure",
+        "total_obligor_exposure",
+        "exposure_amount",
+        "ead",
+        default=0,
+    )
+    try:
+        return float(amount)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def is_defaulted(r: pd.Series) -> bool:
     default_flag = _get(
         r,
@@ -92,17 +161,6 @@ def is_defaulted(r: pd.Series) -> bool:
         days_past_due = 0.0
 
     return _truthy(default_flag) or days_past_due > DEFAULT_DPD_DAYS
-
-
-def is_equity(r: pd.Series) -> bool:
-    values = {
-        _norm(_get(r, "exposure_type")),
-        _norm(_get(r, "asset_class")),
-        _norm(_get(r, "instrument_type")),
-        _norm(_get(r, "counterparty_type")),
-    }
-
-    return bool(values & {"equity", "equities", "share", "shares"})
 
 
 def is_residential_re(r: pd.Series) -> bool:
@@ -144,95 +202,45 @@ def is_commercial_re(r: pd.Series) -> bool:
 
 
 def is_sovereign(r: pd.Series) -> bool:
-    counterparty_type = _norm(
-        _get(
-            r,
-            "counterparty_type",
-            "obligor_type",
-            "borrower_type",
-        )
-    )
-
-    return counterparty_type in {
-        "sovereign",
-        "central_government",
-        "central_gov",
-        "central_bank",
-        "central_gov_central_bank",
-    }
+    return _counterparty(r) in SOVEREIGN_TYPES
 
 
 def is_institution(r: pd.Series) -> bool:
-    counterparty_type = _norm(
-        _get(
-            r,
-            "counterparty_type",
-            "obligor_type",
-            "borrower_type",
-        )
-    )
-
-    return counterparty_type in {
-        "institution",
-        "institutions",
-        "bank",
-        "credit_institution",
-        "financial_institution",
-    }
+    return _counterparty(r) in INSTITUTION_TYPES
 
 
 def is_retail(r: pd.Series) -> bool:
-    counterparty_type = _norm(
-        _get(
-            r,
-            "counterparty_type",
-            "obligor_type",
-            "borrower_type",
-        )
-    )
+    """Regulatory retail: a retail-type obligor at or below the size cap.
 
-    if counterparty_type not in {
-        "retail",
-        "individual",
-        "natural_person",
-        "person",
-        "sme",
-    }:
+    A retail/SME obligor *above* the cap is not regulatory retail; it is picked
+    up by ``is_corporate`` further down the precedence list (CRR3 spillover).
+    """
+    if _counterparty(r) not in REGULATORY_RETAIL_TYPES:
         return False
 
-    exposure_amount = _get(
-        r,
-        "aggregate_obligor_exposure",
-        "total_obligor_exposure",
-        "exposure_amount",
-        "ead",
-        default=0,
-    )
-
-    try:
-        exposure_amount = float(exposure_amount)
-    except (TypeError, ValueError):
-        return False
-
-    return exposure_amount <= RETAIL_LIMIT_EUR
+    return _obligor_exposure(r) <= RETAIL_LIMIT_EUR
 
 
 def is_corporate(r: pd.Series) -> bool:
-    counterparty_type = _norm(
-        _get(
-            r,
-            "counterparty_type",
-            "obligor_type",
-            "borrower_type",
-        )
-    )
+    """Corporate counterparties, plus retail/SME obligors above the retail cap.
 
-    return counterparty_type in {
-        "corporate",
-        "corporates",
-        "company",
-        "large_corporate",
-    }
+    The second clause encodes the CRR3 scoping rule: an SME that fails the
+    regulatory-retail size test is treated under the corporate class rather
+    than retail.
+    """
+    cp = _counterparty(r)
+    if cp in CORPORATE_TYPES:
+        return True
+
+    if cp in REGULATORY_RETAIL_TYPES and _obligor_exposure(r) > RETAIL_LIMIT_EUR:
+        return True
+
+    return False
+
+
+def is_individual(r: pd.Series) -> bool:
+    """Natural persons not otherwise classified (not RE-secured, not defaulted)."""
+    return _counterparty(r) in INDIVIDUAL_TYPES
 
 
 @dataclass(frozen=True)
@@ -243,16 +251,28 @@ class Rule:
 
 
 # ORDER = PRECEDENCE. First match wins.
+#
+# The `exposure_class` strings are the vocabulary of config/risk_weights.yaml,
+# so the assignment stage can look up a weight directly with no translation
+# layer. Precedence follows CRR3: default status overrides everything; real
+# estate security overrides the counterparty class; then the counterparty
+# hierarchy (sovereign -> institution -> retail -> corporate -> individual).
 RULES = [
-    Rule("defaulted",      is_defaulted,      "exposures_in_default"),
-    Rule("equity",         is_equity,         "equity"),
-    Rule("residential_re", is_residential_re, "secured_by_residential_re"),
-    Rule("commercial_re",  is_commercial_re,  "secured_by_commercial_re"),
-    Rule("sovereign",      is_sovereign,      "central_gov_central_bank"),
-    Rule("institution",    is_institution,    "institutions"),
+    Rule("defaulted",      is_defaulted,      "defaulted"),
+    Rule("residential_re", is_residential_re, "residential_real_estate"),
+    Rule("commercial_re",  is_commercial_re,  "commercial_real_estate"),
+    Rule("sovereign",      is_sovereign,      "sovereign"),
+    Rule("institution",    is_institution,    "institution"),
     Rule("retail",         is_retail,         "retail"),
-    Rule("corporate",      is_corporate,      "corporates"),
+    Rule("corporate",      is_corporate,      "corporate"),
+    Rule("individual",     is_individual,     "individual"),
 ]
+
+# Fallback bucket for rows no rule matches. Aligned with the YAML `other` class
+# (conservative 100% weight). Equity and other CRR3 classes are intentionally
+# out of scope for this synthetic project and land here if ever encountered.
+FALLBACK_CLASS = "other"
+FALLBACK_RULE = "no_rule_matched"
 
 
 def classify_row(r: pd.Series) -> tuple[str, str]:
@@ -260,7 +280,7 @@ def classify_row(r: pd.Series) -> tuple[str, str]:
         if rule.predicate(r):
             return rule.exposure_class, rule.name
 
-    return "unclassified", "no_rule_matched"
+    return FALLBACK_CLASS, FALLBACK_RULE
 
 
 def classify(df: pd.DataFrame) -> pd.DataFrame:
