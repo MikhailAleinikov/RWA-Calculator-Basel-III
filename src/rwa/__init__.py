@@ -1,7 +1,7 @@
 """
 rwa -- a CRR3 / Basel III standardised-approach risk-weighted-assets calculator.
 
-A seven-stage pipeline over a synthetic (or real) loan portfolio:
+A six-stage pipeline over a synthetic (or real) loan portfolio:
 
     extract    generate_portfolio        synthetic book from config/portfolio.yaml
     validate   validate                  clean, correct, exclude unpriceable rows

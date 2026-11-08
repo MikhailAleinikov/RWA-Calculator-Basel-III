@@ -98,9 +98,7 @@ def _is_ipre(r: pd.Series) -> bool:
     return _norm(flag) in {"true", "t", "yes", "y", "1", "ipre", "income_producing"}
 
 
-# ---------------------------------------------------------------------------
-# Per-strategy lookups. Each returns (risk_weight, source_label).
-# ---------------------------------------------------------------------------
+
 def _lookup_rating(table: dict, cls: str, r: pd.Series, valid_buckets: set[str]):
     sub = table["by_class_rating"][cls]
     bucket = _rating_bucket(r, valid_buckets)
